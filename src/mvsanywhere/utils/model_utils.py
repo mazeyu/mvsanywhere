@@ -30,7 +30,10 @@ def load_model_inference(opts, model_class_to_use):
     except:
         logger.info("Failed to load model normally. Using manual loading via state_dict.")
         model = model_class_to_use(opts)
-        model.load_state_dict(torch.load(opts.load_weights_from_checkpoint)["state_dict"])
+        if opts.load_weights_from_checkpoint is not None:
+            model.load_state_dict(torch.load(opts.load_weights_from_checkpoint)["state_dict"])
+        else:
+            logger.info("No weights loaded. Instantiating new model from scratch.")
 
         # Force re-initialization of the cost volume
         model.cost_volume.matching_height = -1
