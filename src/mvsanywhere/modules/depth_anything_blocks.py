@@ -253,7 +253,7 @@ class DPTHead(nn.Module):
             [
                 nn.Sequential(
                     nn.Conv2d(head_features_1, head_features_1 // 2, kernel_size=3, stride=1, padding=1),
-                    nn.Upsample(scale_factor=(16 * prediction_scale / 2 ** i) / 8, mode='bilinear', align_corners=True),
+                    nn.Upsample(scale_factor=(16 * prediction_scale) / 8, mode='bilinear', align_corners=True),
                     nn.Conv2d(head_features_1 // 2, head_features_2, kernel_size=3, stride=1, padding=1),
                     nn.ReLU(True),
                     nn.Conv2d(head_features_2, nclass, kernel_size=1, stride=1, padding=0),
@@ -266,7 +266,7 @@ class DPTHead(nn.Module):
             [
                 nn.Sequential(
                     nn.Conv2d(head_features_1, head_features_1 // 2, kernel_size=3, stride=1, padding=1),
-                    nn.Upsample(scale_factor=(16 * prediction_scale / 2 ** i) / 8, mode='bilinear', align_corners=True),
+                    nn.Upsample(scale_factor=(16 * prediction_scale) / 8, mode='bilinear', align_corners=True),
                     nn.Conv2d(head_features_1 // 2, head_features_2, kernel_size=3, stride=1, padding=1),
                     nn.ReLU(True),
                     nn.Conv2d(head_features_2, nclass, kernel_size=1, stride=1, padding=0),
@@ -278,8 +278,8 @@ class DPTHead(nn.Module):
 
     def set_prediction_scale(self, prediction_scale):
         for i in range(4):
-            self.output_convs[i][1] = nn.Upsample(scale_factor=(16 * prediction_scale / 2 ** i) / 8, mode='bilinear', align_corners=True)
-            self.sky_convs[i][1] = nn.Upsample(scale_factor=(16 * prediction_scale / 2 ** i) / 8, mode='bilinear', align_corners=True)
+            self.output_convs[i][1] = nn.Upsample(scale_factor=(16 * prediction_scale) / 8, mode='bilinear', align_corners=True)
+            self.sky_convs[i][1] = nn.Upsample(scale_factor=(16 * prediction_scale) / 8, mode='bilinear', align_corners=True)
 
             
     def forward(self, out_features, patch_h, patch_w):
