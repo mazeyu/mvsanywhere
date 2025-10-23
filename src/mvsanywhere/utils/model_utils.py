@@ -30,18 +30,23 @@ def load_model_inference(opts, model_class_to_use):
     except:
         logger.info("Failed to load model normally. Using manual loading via state_dict.")
         model = model_class_to_use(opts)
-        state_dict = torch.load(opts.load_weights_from_checkpoint)["state_dict"]
 
-        # These keys exist and may cause incompatible shape issues
-        state_dict.pop('compute_normals.backproject.pix_coords_13N')
-        state_dict.pop('mv_depth_loss.backproject.pix_coords_13N')
+        if opts.load_weights_from_checkpoint is not None:
+            model.load_state_dict(torch.load(opts.load_weights_from_checkpoint)["state_dict"])
+            state_dict = torch.load(opts.load_weights_from_checkpoint)["state_dict"]
+            
+            # These keys exist and may cause incompatible shape issues
+            state_dict.pop('compute_normals.backproject.pix_coords_13N')
+            state_dict.pop('mv_depth_loss.backproject.pix_coords_13N')
 
-        incompatible_keys = model.load_state_dict(state_dict, strict=False)
-
-        for key in incompatible_keys.missing_keys:
-            logger.info(f"WARNING: Missing keys for {key}")
-        for key in incompatible_keys.unexpected_keys:
-            logger.info(f"WARNING: Unexpected keys for {key}")
+            incompatible_keys = model.load_state_dict(state_dict, strict=False)
+            for key in incompatible_keys.missing_keys:
+                logger.info(f"WARNING: Missing keys for {key}")
+            for key in incompatible_keys.unexpected_keys:
+                logger.info(f"WARNING: Unexpected keys for {key}")
+    
+        else:
+            logger.info("No weights loaded. Instantiating new model from scratch.")
 
         # Force re-initialization of the cost volume
         model.cost_volume.matching_height = -1
