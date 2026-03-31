@@ -288,35 +288,38 @@ def read_pfm_file(
     target_aspect_ratio=None
 ):
 
-    file = open(filename, 'rb')
-
-    header = file.readline().decode('utf-8').rstrip()
-    if header == 'PF':
-        color = True
-    elif header == 'Pf':
-        color = False
+    if filename.endswith('.npy'):
+        data = np.load(filename)
     else:
-        raise Exception('Not a PFM file.')
+        file = open(filename, 'rb')
 
-    dim_match = re.match(r'^(\d+)\s(\d+)\s$', file.readline().decode('utf-8'))
-    if dim_match:
-        w, h = map(int, dim_match.groups())
-    else:
-        raise Exception('Malformed PFM header.')
+        header = file.readline().decode('utf-8').rstrip()
+        if header == 'PF':
+            color = True
+        elif header == 'Pf':
+            color = False
+        else:
+            raise Exception('Not a PFM file.')
 
-    scale = float(file.readline().rstrip())
-    if scale < 0:  # little-endian
-        endian = '<'
-        scale = -scale
-    else:
-        endian = '>'  # big-endian
+        dim_match = re.match(r'^(\d+)\s(\d+)\s$', file.readline().decode('utf-8'))
+        if dim_match:
+            w, h = map(int, dim_match.groups())
+        else:
+            raise Exception('Malformed PFM header.')
 
-    data = np.fromfile(file, endian + 'f')
-    shape = (h, w, 3) if color else (h, w)
+        scale = float(file.readline().rstrip())
+        if scale < 0:  # little-endian
+            endian = '<'
+            scale = -scale
+        else:
+            endian = '>'  # big-endian
 
-    data = np.reshape(data, shape)
-    data = np.flipud(data)
-    file.close()
+        data = np.fromfile(file, endian + 'f')
+        shape = (h, w, 3) if color else (h, w)
+
+        data = np.reshape(data, shape)
+        data = np.flipud(data)
+        file.close()
 
     img = Image.fromarray(data)
     # Stuff from read_image_file

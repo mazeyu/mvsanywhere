@@ -353,10 +353,11 @@ class OptionsHandler:
                     for data_config in cl_args.data_config_file.split(":")
                 ]
                 self.config_filepaths.append(cl_args.data_config_file)
-            if cl_args.val_data_config_file is not None:
+            if cl_args.val_data_config_file is not None and cl_args.val_data_config_file.strip():
                 self.options.val_datasets = [
                     OptionsHandler.load_options_from_yaml(data_config)
                     for data_config in cl_args.val_data_config_file.split(":")
+                    if data_config.strip()
                 ]
                 self.config_filepaths.append(cl_args.val_data_config_file)
         else:

@@ -32,11 +32,168 @@ import mvsanywhere.options as options
 from mvsanywhere.utils.dataset_utils import get_dataset
 from mvsanywhere.utils.generic_utils import copy_code_state
 from mvsanywhere.utils.model_utils import get_model_class
+from mvsanywhere.experiment_modules.rmvd_mvsa import MVSA_Wrapped
+from tqdm import tqdm
+import skimage
+import numpy as np
+import torch.nn as nn
 
 
-def prepare_dataloaders(opts: options.Options) -> Tuple[List[DataLoader], List[DataLoader]]:
+def _inputs_and_gt_from_sample(sample, inputs=["images", "intrinsics", "poses", "depth_range"]):
+    is_input = lambda key: key in inputs or key == "keyview_idx"
+    sample_inputs = {key: val for key, val in sample.items() if is_input(key)}
+    sample_gt = {key: val for key, val in sample.items() if not is_input(key)}
+    return sample_inputs, sample_gt
+
+
+def _compute_metrics(sample_gt, pred):
+    from rmvd.eval.metrics import m_rel_ae, pointwise_rel_ae, thresh_inliers, sparsification
+    gt_depth = sample_gt['depth'][0, 0]
+    pred_depth = pred['depth'][0, 0]
+    eval_mask = np.ones_like(pred_depth, dtype=bool)
+    absrel = m_rel_ae(gt=gt_depth, pred=pred_depth, mask=eval_mask, output_scaling_factor=100.0)
+    metrics = {'absrel': absrel}
+    for i in [30]:
+        thresh = 1.03 ** (i / 30)
+        inliers = thresh_inliers(gt=gt_depth, pred=pred_depth, thresh=thresh, mask=eval_mask, output_scaling_factor=100.0)
+        metrics[f"inliers_{i}"] = inliers
+    return metrics
+
+
+def _postprocess_sample_and_output(sample_inputs, sample_gt, pred, clip_pred_depth=True):
+    gt_depth = sample_gt['depth']
+    pred_depth = pred['depth']
+    pred_depth = skimage.transform.resize(pred_depth, gt_depth.shape, order=0, anti_aliasing=False)
+
+    pred_mask = np.ones_like(pred_depth, dtype=bool)
+    gt_mask = gt_depth > 0
+    if isinstance(clip_pred_depth, tuple):
+        pred_depth = np.clip(pred_depth, clip_pred_depth[0], clip_pred_depth[1]) * pred_mask
+    elif clip_pred_depth:
+        pred_depth = np.clip(pred_depth, 0.1, 100) * pred_mask
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        pred_invdepth = np.nan_to_num(1 / pred_depth, nan=0, posinf=0, neginf=0)
+
+    if 'depth_uncertainty' in pred:
+        pred_depth_uncertainty = pred['depth_uncertainty']
+        pred_depth_uncertainty = skimage.transform.resize(pred_depth_uncertainty, gt_depth.shape, order=0,
+                                                            anti_aliasing=False)
+        pred['depth_uncertainty'] = pred_depth_uncertainty
+
+    pred['depth'] = pred_depth
+    pred['invdepth'] = pred_invdepth
+
+
+def deep_clone(obj):
+    if torch.is_tensor(obj):
+        return obj.clone().detach()
+    elif isinstance(obj, np.ndarray):
+        return obj.copy()
+    elif isinstance(obj, dict):
+        return {k: deep_clone(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [deep_clone(v) for v in obj]
+    elif isinstance(obj, tuple):
+        return tuple(deep_clone(v) for v in obj)
+    else:
+        return obj
+
+
+class RMVDEvaluationCallback(pl.Callback):
+    def __init__(self, opts):
+        self.opts = opts
+        self._last_trigger_step = -1
+
+    def _run_rmvd_eval(self, trainer, pl_module):
+        if not trainer.is_global_zero:
+            return
+
+        model = MVSA_Wrapped(self.opts, use_refinement=True, model=pl_module)
+        rmvd_val_dir = os.environ.get("RMVD_SAMPLES_VAL_DIR")
+        if rmvd_val_dir is None:
+            return
+
+        was_training = pl_module.training
+        pl_module.eval()
+        with torch.no_grad():
+            for dataset in ["eth3d", "kitti", "dtu", "scannet", "tanks_and_temples"]:
+                sample_root = os.path.join(rmvd_val_dir, dataset)
+                if not os.path.exists(sample_root):
+                    continue
+                absrels = []
+                inliers = []
+                for sample_id in tqdm(sorted(os.listdir(sample_root))):
+                    sample_path = os.path.join(sample_root, sample_id)
+                    sample = torch.load(sample_path)
+                    sample_inputs0, sample_gt = _inputs_and_gt_from_sample(sample)
+                    if len(sample_gt["depth"].shape) != 4:
+                        sample_gt["depth"] = np.expand_dims(sample_gt["depth"], axis=0)
+
+                    metrics = {}
+                    n = len(sample_inputs0["images"]) - 1
+
+                    if self.opts.model_num_views == 8:
+                        pair_candidates = [
+                            [0, *range(1, n // 2 + 1)],
+                            [0, *range(n // 2 + 1, n + 1)],
+                            [0, *range(1, n + 1)],
+                        ]
+                    else:
+                        pair_candidates = [[0, i] for i in range(1, n + 1, 2)]
+
+                    for i, frames in enumerate(pair_candidates):
+                        original_frames = [sample_inputs0['keyview_idx'][0], *[j for j in range(n + 1) if j != sample_inputs0['keyview_idx'][0]]]
+                        sample_inputs = deep_clone(sample_inputs0)
+                        sample_inputs["images"] = [sample_inputs["images"][original_frames[j]] for j in frames]
+                        sample_inputs["poses"] = [sample_inputs["poses"][original_frames[j]] for j in frames]
+                        sample_inputs["intrinsics"] = [sample_inputs["intrinsics"][original_frames[j]] for j in frames]
+                        sample_inputs['keyview_idx'][0] = 0
+                        sample_inputs = model.input_adapter(**sample_inputs)
+                        pred = model.output_adapter(model(**sample_inputs))[0]
+                        _postprocess_sample_and_output(sample_inputs, sample_gt, pred)
+                        metrics[i] = _compute_metrics(sample_gt, pred)
+                    best_i = max(metrics.keys(), key=lambda x: metrics[x]['inliers_30'])
+                    absrels.append(metrics[best_i]['absrel'])
+                    inliers.append(metrics[best_i]['inliers_30'])
+                absrel = np.mean(absrels)
+                inlier = np.mean(inliers)
+                for key, val in zip(["absrel", "inliers_103"], [absrel, inlier]):
+                    trainer.logger.experiment.add_scalar(f"custom_eval/{dataset}_{key}", val, global_step=trainer.global_step)
+
+        if was_training:
+            pl_module.train()
+
+    def on_validation_end(self, trainer, pl_module):
+        self._run_rmvd_eval(trainer, pl_module)
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        num_val_batches = trainer.num_val_batches
+        if isinstance(num_val_batches, (list, tuple)):
+            has_real_val_data = any(v > 0 for v in num_val_batches)
+        else:
+            has_real_val_data = num_val_batches > 0
+
+        if has_real_val_data:
+            return
+
+        if not isinstance(self.opts.val_interval, int) or self.opts.val_interval <= 0:
+            return
+
+        step = trainer.global_step
+        if step <= 0 or step % self.opts.val_interval != 0:
+            return
+
+        if step == self._last_trigger_step:
+            return
+
+        self._last_trigger_step = step
+        self._run_rmvd_eval(trainer, pl_module)
+
+
+def prepare_dataloaders(opts: options.Options) -> Tuple[DataLoader, Optional[DataLoader]]:
     """
-    Prepare training and validation dataloaders/
+    Prepare training and validation dataloaders.
     Training loader is one, while we might have multiple dataloaders for validations.
     For instance, we might validate using a different augmentation for hints (always given, never
     given, given with 50% chances etc).
@@ -44,9 +201,8 @@ def prepare_dataloaders(opts: options.Options) -> Tuple[List[DataLoader], List[D
     Params:
         opts: options for the current run
     Returns:
-        a train dataloader, a list of dataloaders for validation
+        a train dataloader, a validation dataloader (or None if no validation set)
     """
-    # load dataset and dataloaders
     train_datasets, val_datasets = [], []
     for dataset in opts.datasets:
         dataset_class, _ = get_dataset(
@@ -69,24 +225,25 @@ def prepare_dataloaders(opts: options.Options) -> Tuple[List[DataLoader], List[D
         train_datasets.append(train_dataset)
 
 
-    for dataset in opts.val_datasets:
-        dataset_class, _ = get_dataset(
-            dataset.dataset, dataset.dataset_scan_split_file, opts.single_debug_scan_id
-        )
-        val_dataset = dataset_class(
-            dataset.dataset_path,
-            split="val",
-            mv_tuple_file_suffix=dataset.mv_tuple_file_suffix,
-            num_images_in_tuple=opts.num_images_in_tuple,
-            tuple_info_file_location=dataset.tuple_info_file_location,
-            image_width=opts.val_image_width,
-            image_height=opts.val_image_height,
-            include_full_res_depth=opts.high_res_validation,
-            matching_scale=opts.matching_scale,
-            prediction_scale=opts.prediction_scale,
-            prediction_num_scales=opts.prediction_num_scales
-        )
-        val_datasets.append(val_dataset)
+    if opts.val_datasets:
+        for dataset in opts.val_datasets:
+            dataset_class, _ = get_dataset(
+                dataset.dataset, dataset.dataset_scan_split_file, opts.single_debug_scan_id
+            )
+            val_dataset = dataset_class(
+                dataset.dataset_path,
+                split="val",
+                mv_tuple_file_suffix=dataset.mv_tuple_file_suffix,
+                num_images_in_tuple=opts.num_images_in_tuple,
+                tuple_info_file_location=dataset.tuple_info_file_location,
+                image_width=opts.val_image_width,
+                image_height=opts.val_image_height,
+                include_full_res_depth=opts.high_res_validation,
+                matching_scale=opts.matching_scale,
+                prediction_scale=opts.prediction_scale,
+                prediction_num_scales=opts.prediction_num_scales
+            )
+            val_datasets.append(val_dataset)
 
     train_dataloader = DataLoader(
         ConcatDataset(train_datasets),
@@ -98,15 +255,19 @@ def prepare_dataloaders(opts: options.Options) -> Tuple[List[DataLoader], List[D
         persistent_workers=True,
     )
 
-    val_dataloader = DataLoader(
-        ConcatDataset(val_datasets),
-        batch_size=opts.val_batch_size,
-        shuffle=False,
-        num_workers=opts.num_workers,
-        pin_memory=True,
-        drop_last=True,
-        persistent_workers=True,
-    )
+    # Only create validation dataloader if there are validation datasets
+    if val_datasets:
+        val_dataloader = DataLoader(
+            ConcatDataset(val_datasets),
+            batch_size=opts.val_batch_size,
+            shuffle=False,
+            num_workers=opts.num_workers,
+            pin_memory=True,
+            drop_last=True,
+            persistent_workers=True,
+        )
+    else:
+        val_dataloader = None
 
     return train_dataloader, val_dataloader
 
@@ -136,7 +297,7 @@ def prepare_callbacks(
 
     # keep track of changes in learning rate
     lr_monitor = LearningRateMonitor(logging_interval="step")
-    callbacks = [checkpoint_callback, lr_monitor]
+    callbacks = [checkpoint_callback, lr_monitor, RMVDEvaluationCallback(opts)]
     return callbacks
 
 
@@ -234,6 +395,7 @@ def prepare_trainer(
         plugins=plugins,
         limit_train_batches=10000,
         profiler="simple",
+        check_val_every_n_epoch=None,
     )
     return trainer
 
@@ -292,5 +454,7 @@ if __name__ == "__main__":
     if opts.gpus == 0:
         print("Setting precision to 32 bits since --gpus is set to 0.")
         opts.precision = 32
+
+    opts.lr_steps = [int(0.7 * opts.max_steps * 0.6665 / 2), int(0.8 * opts.max_steps * 0.6665 / 2)]
 
     main(opts)

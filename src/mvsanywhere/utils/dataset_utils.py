@@ -6,6 +6,7 @@ from mvsanywhere.datasets.blendedmvg import BlendedMVGDataset
 from mvsanywhere.datasets.colmap_dataset import ColmapDataset
 from mvsanywhere.datasets.dynamic_replica import DynamicReplicaDataset
 from mvsanywhere.datasets.hypersim import HypersimDataset
+from mvsanywhere.datasets.infinigen_cubism import InfinigenCubismDataset
 from mvsanywhere.datasets.matrix_city import MatrixCityDataset
 from mvsanywhere.datasets.mvssynth import MVSSynthDataset
 from mvsanywhere.datasets.nerf_dataset import NeRFDataset
@@ -244,7 +245,21 @@ def get_dataset(dataset_name, split_filepath, single_debug_scan_id=None, verbose
             print(f" NeRF Studio Dataset, number of scans: {len(scans)} ".center(80, "#"))
             print(f"".center(80, "#"))
             print("")
-  
+
+    elif dataset_name == "infinigen_cubism":
+        with open(split_filepath) as file:
+            scans = file.readlines()
+            scans = [scan.strip() for scan in scans]
+
+        if single_debug_scan_id is not None:
+            scans = [single_debug_scan_id]
+
+        dataset_class = InfinigenCubismDataset
+        if verbose:
+            print(f"".center(80, "#"))
+            print(f" Infinigen Cubism Dataset, number of scans: {len(scans)} ".center(80, "#"))
+            print(f"".center(80, "#"))
+            print("")
 
     else:
         raise ValueError(f"Not a recognized dataset: {dataset_name}")

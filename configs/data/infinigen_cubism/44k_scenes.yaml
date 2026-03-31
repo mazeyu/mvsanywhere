@@ -1,0 +1,9 @@
+!!python/object:mvsanywhere.options.DataOptions
+dataset_path: path/to/dataset
+tuple_info_file_location: data_splits/infinigen_cubism/
+dataset_scan_split_file: data_splits/infinigen_cubism/infinigen_cubism_44000scenes.txt
+dataset: infinigen_cubism
+mv_tuple_file_suffix: _pair_44000scenes.txt
+num_images_in_tuple: 8
+frame_tuple_type: default
+split: train
